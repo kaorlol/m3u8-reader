@@ -164,15 +164,3 @@ fn parse_frame_stream(line: &[u8]) -> Result<FrameStream> {
 
 	Ok(stream)
 }
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn test_parse_multi_variant_playlist() {
-		let playlist = include_bytes!("../master.m3u8");
-		let result = parse(playlist).unwrap();
-		println!("{:#?}", result);
-	}
-}

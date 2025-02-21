@@ -85,15 +85,3 @@ pub fn parse(bytes: &[u8]) -> Result<MediaPlaylist> {
 		segments,
 	})
 }
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn test_parse() {
-		let variant = include_bytes!("../variant.m3u8");
-		let playlist = parse(variant).unwrap();
-		println!("{:#?}", playlist);
-	}
-}

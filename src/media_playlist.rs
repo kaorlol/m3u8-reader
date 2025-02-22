@@ -53,7 +53,7 @@ pub fn parse(bytes: &[u8]) -> Result<MediaPlaylist> {
 				duration,
 				url: String::new(),
 			});
-		} else if line.starts_with(b"https://") {
+		} else if line.trim_ascii().starts_with(b"https://") {
 			if let Some(last_segment) = segments.last_mut() {
 				last_segment.url = str::from_utf8(line)?.trim().to_string();
 			}

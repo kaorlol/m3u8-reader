@@ -55,7 +55,7 @@ pub fn parse(bytes: &[u8]) -> Result<MultiVariantPlaylist> {
 
 		if line.starts_with(b"#EXT-X-STREAM-INF") {
 			variant_streams.push(parse_variant_stream(line)?);
-		} else if line.ends_with(b".m3u8\r") {
+		} else if line.trim_ascii().ends_with(b".m3u8") {
 			if let Some(last_stream) = variant_streams.last_mut() {
 				last_stream.uri = str::from_utf8(line)?.trim().to_string();
 			}

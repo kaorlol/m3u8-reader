@@ -1,6 +1,6 @@
 [package]
 name = "m3u8-reader"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 repository = "https://github.com/kaorlol/m3u8-reader"
 description = "This isn't production ready, but it works for my use case."
@@ -11,5 +11,6 @@ include = [
 ]
 
 [dependencies]
-memchr = "2.7.4"
+lexical = "7.0.4"
+logos = "0.15.0"
 thiserror = "2.0.11"

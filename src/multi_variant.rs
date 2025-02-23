@@ -1,9 +1,59 @@
-use crate::error::{Context as _, Result};
-use memchr::memchr;
-use std::str;
+use crate::{
+	bail,
+	error::{Context as _, Error, Result},
+};
+use logos::Logos;
 
-/// Master playlist that lists multiple variant streams of the same content
-#[derive(Debug)]
+#[derive(Logos, Debug, PartialEq)]
+#[logos(skip r"[ \t\n\f]+")]
+#[logos(error = String)]
+pub enum Token<'a> {
+	#[token("#EXTM3U")]
+	ExtM3U,
+	#[token("#EXT-X-STREAM-INF")]
+	StreamInf,
+	#[token("#EXT-X-I-FRAME-STREAM-INF")]
+	IFrameStreamInf,
+
+	#[token("PROGRAM-ID")]
+	ProgramId,
+	#[token("BANDWIDTH")]
+	Bandwidth,
+	#[token("RESOLUTION")]
+	Resolution,
+	#[token("FRAME-RATE")]
+	FrameRate,
+	#[token("CODECS")]
+	Codecs,
+	#[token("URI")]
+	Uri,
+
+	#[token("=")]
+	Equal,
+	#[token(",")]
+	Comma,
+	#[token(":")]
+	Colon,
+
+	#[regex(r"[0-9]+\.[0-9]+", |lex| lexical::parse(lex.slice()).ok())]
+	Float(f64),
+	#[regex(r"[0-9]+", |lex| lexical::parse(lex.slice()).ok())]
+	Integer(usize),
+	#[regex(r#""([^"]*)""#, |lex| lex.slice()[1..lex.slice().len() - 1].as_ref())]
+	String(&'a str),
+
+	#[regex(r"[0-9]+x[0-9]+", |lex| {
+		let mut parts = lex.slice().split('x');
+		let width = parts.next().unwrap().parse().unwrap();
+		let height = parts.next().unwrap().parse().unwrap();
+		(width, height)
+	})]
+	ResolutionValue((usize, usize)),
+	#[regex(r"[a-zA-Z0-9\-_]+\.m3u8")]
+	UriValue(&'a str),
+}
+
+#[derive(Debug, PartialEq)]
 pub struct MultiVariantPlaylist {
 	/// These lines define the variant streams.
 	/// Each line represents a different version of the same content, encoded at different bitrates and resolutions.
@@ -15,7 +65,7 @@ pub struct MultiVariantPlaylist {
 	pub frame_streams: Vec<FrameStream>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct VariantStream {
 	/// Identifies the program or content.
 	pub program_id: Option<u8>,
@@ -31,7 +81,7 @@ pub struct VariantStream {
 	pub uri: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FrameStream {
 	/// The average bitrate of the I-frame stream.
 	pub bandwidth: u32,
@@ -43,27 +93,22 @@ pub struct FrameStream {
 	pub uri: String,
 }
 
-pub fn parse(bytes: &[u8]) -> Result<MultiVariantPlaylist> {
+pub fn parse(input: &str) -> Result<MultiVariantPlaylist> {
+	let mut lexer = Token::lexer(input);
 	let mut variant_streams = Vec::new();
 	let mut frame_streams = Vec::new();
 
-	let mut position = 0;
-	while position < bytes.len() {
-		let newline_pos =
-			memchr(b'\n', &bytes[position..]).unwrap_or(bytes.len() - position) + position;
-		let line = &bytes[position..newline_pos];
-
-		if line.starts_with(b"#EXT-X-STREAM-INF") {
-			variant_streams.push(parse_variant_stream(line)?);
-		} else if line.trim_ascii().ends_with(b".m3u8") {
-			if let Some(last_stream) = variant_streams.last_mut() {
-				last_stream.uri = str::from_utf8(line)?.trim().to_string();
+	while let Some(token) = lexer.next() {
+		match token? {
+			Token::ExtM3U => (),
+			Token::StreamInf => {
+				variant_streams.push(parse_variant_stream(&mut lexer)?);
 			}
-		} else if line.starts_with(b"#EXT-X-I-FRAME-STREAM-INF") {
-			frame_streams.push(parse_frame_stream(line)?);
+			Token::IFrameStreamInf => {
+				frame_streams.push(parse_frame_stream(&mut lexer)?);
+			}
+			_ => (),
 		}
-
-		position = newline_pos + 1;
 	}
 
 	Ok(MultiVariantPlaylist {
@@ -72,95 +117,181 @@ pub fn parse(bytes: &[u8]) -> Result<MultiVariantPlaylist> {
 	})
 }
 
-fn parse_variant_stream(line: &[u8]) -> Result<VariantStream> {
-	let mut in_quotes = false;
-	let mut attributes = Vec::new();
-	let mut current_attribute = Vec::new();
+fn parse_variant_stream<'a>(lexer: &mut logos::Lexer<'a, Token<'a>>) -> Result<VariantStream> {
+	let mut program_id = None;
+	let mut bandwidth = 0;
+	let mut resolution = (0, 0);
+	let mut frame_rate = None;
+	let mut codecs = None;
+	let mut uri = String::new();
 
-	for &byte in &line[18..] {
-		if byte == b'"' {
-			in_quotes = !in_quotes;
-			current_attribute.push(byte);
-		} else if byte == b',' && !in_quotes {
-			attributes.push(current_attribute.clone());
-			current_attribute.clear();
-		} else {
-			current_attribute.push(byte);
+	while let Some(token) = lexer.next() {
+		match token? {
+			Token::Colon => (),
+			Token::Equal => (),
+			Token::Comma => (),
+			Token::ProgramId => {
+				program_id = match lexer.nth(1).context("program id")?? {
+					Token::Integer(value) => Some(value as u8),
+					_ => bail!("Invalid program id"),
+				};
+			}
+			Token::Bandwidth => {
+				bandwidth = match lexer.nth(1).context("bandwidth")?? {
+					Token::Integer(value) => value as u32,
+					_ => bail!("Invalid bandwidth"),
+				};
+			}
+			Token::Resolution => {
+				resolution = match lexer.nth(1).context("resolution")?? {
+					Token::ResolutionValue(res) => (res.0 as u16, res.1 as u16),
+					_ => bail!("Invalid resolution"),
+				};
+			}
+			Token::FrameRate => {
+				frame_rate = match lexer.nth(1).context("frame rate")?? {
+					Token::Float(rate) => Some(rate as f32),
+					_ => bail!("Invalid frame rate"),
+				};
+			}
+			Token::Codecs => {
+				codecs = Some(match lexer.nth(1).context("codecs")?? {
+					Token::String(codec) => codec.to_string(),
+					_ => bail!("Invalid codecs"),
+				});
+			}
+			Token::UriValue(value) => {
+				uri = value.to_string();
+				break;
+			}
+			_ => bail!("Invalid variant stream"),
 		}
 	}
-	attributes.push(current_attribute);
 
-	let mut stream = VariantStream {
-		program_id: None,
-		bandwidth: 0,
-		resolution: (0, 0),
-		frame_rate: None,
-		codecs: None,
-		uri: String::new(),
-	};
-
-	for attribute in attributes {
-		let mut parts = attribute.splitn(2, |&byte| byte == b'=');
-		let key = parts.next().context("Missing key")?;
-		let value = parts.next().context("Missing value")?;
-
-		match key {
-			b"PROGRAM-ID" => stream.program_id = str::from_utf8(value)?.parse().ok(),
-			b"BANDWIDTH" => stream.bandwidth = str::from_utf8(value)?.parse()?,
-			b"RESOLUTION" => {
-				let mut res_parts = value.trim_ascii().splitn(2, |&byte| byte == b'x');
-				stream.resolution.0 =
-					str::from_utf8(res_parts.next().context("Missing width")?)?.parse()?;
-				stream.resolution.1 =
-					str::from_utf8(res_parts.next().context("Missing height")?)?.parse()?;
-			}
-			b"FRAME-RATE" => stream.frame_rate = str::from_utf8(value)?.parse().ok(),
-			b"CODECS" => {
-				stream.codecs = Some(str::from_utf8(value)?.replace('\"', "").trim().to_string())
-			}
-			_ => eprintln!(
-				"Unknown attribute: {}",
-				str::from_utf8(key).unwrap_or("Invalid UTF-8")
-			),
-		}
-	}
-
-	Ok(stream)
+	Ok(VariantStream {
+		program_id,
+		bandwidth,
+		resolution,
+		frame_rate,
+		codecs,
+		uri,
+	})
 }
 
-fn parse_frame_stream(line: &[u8]) -> Result<FrameStream> {
-	let attributes = line[26..].split(|&byte| byte == b',').collect::<Vec<_>>();
-	let mut stream = FrameStream {
-		bandwidth: 0,
-		resolution: (0, 0),
-		codecs: String::new(),
-		uri: String::new(),
-	};
+fn parse_frame_stream<'a>(lexer: &mut logos::Lexer<'a, Token<'a>>) -> Result<FrameStream> {
+	let mut bandwidth = 0;
+	let mut resolution = (0, 0);
+	let mut codecs = String::new();
+	let mut uri = String::new();
 
-	for attribute in attributes {
-		let mut parts = attribute.splitn(2, |&byte| byte == b'=');
-		let key = parts.next().context("Missing key")?;
-		let value = parts.next().context("Missing value")?;
-
-		match key {
-			b"BANDWIDTH" => stream.bandwidth = str::from_utf8(value)?.parse()?,
-			b"RESOLUTION" => {
-				let mut res_parts = value.trim_ascii().splitn(2, |&byte| byte == b'x');
-				stream.resolution.0 =
-					str::from_utf8(res_parts.next().context("Missing width")?)?.parse()?;
-				stream.resolution.1 =
-					str::from_utf8(res_parts.next().context("Missing height")?)?.parse()?;
+	while let Some(token) = lexer.next() {
+		match token? {
+			Token::Colon => (),
+			Token::Equal => (),
+			Token::Comma => (),
+			Token::Bandwidth => {
+				bandwidth = match lexer.nth(1).context("bandwidth")?? {
+					Token::Integer(value) => value as u32,
+					_ => bail!("Invalid bandwidth"),
+				};
 			}
-			b"CODECS" => {
-				stream.codecs = str::from_utf8(value)?.replace('\"', "").trim().to_string()
+			Token::Resolution => {
+				resolution = match lexer.nth(1).context("resolution")?? {
+					Token::ResolutionValue(res) => (res.0 as u16, res.1 as u16),
+					_ => bail!("Invalid resolution"),
+				};
 			}
-			b"URI" => stream.uri = str::from_utf8(value)?.replace('\"', "").trim().to_string(),
-			_ => eprintln!(
-				"Unknown attribute: {}",
-				str::from_utf8(key).unwrap_or("Invalid UTF-8")
-			),
+			Token::Codecs => {
+				codecs = match lexer.nth(1).context("codecs")?? {
+					Token::String(codec) => codec.to_string(),
+					_ => bail!("Invalid codecs"),
+				};
+			}
+			Token::Uri => {
+				uri = match lexer.nth(1).context("uri")?? {
+					Token::String(uri) => uri.to_string(),
+					_ => bail!("Invalid uri"),
+				};
+				break;
+			}
+			_ => bail!("Invalid frame stream"),
 		}
 	}
 
-	Ok(stream)
+	Ok(FrameStream {
+		bandwidth,
+		resolution,
+		codecs,
+		uri,
+	})
+}
+
+#[test]
+fn test_variant_stream_token() {
+	let input = "
+		#EXTM3U
+		#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=2553505,RESOLUTION=1920x1080,FRAME-RATE=25.000,CODECS=\"avc1.640032,mp4a.40.2\"
+		index-f1-v1-a1.m3u8
+		#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=1420969,RESOLUTION=1280x720,FRAME-RATE=25.000,CODECS=\"avc1.64001f,mp4a.40.2\"
+		index-f2-v1-a1.m3u8
+		#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=641061,RESOLUTION=640x360,FRAME-RATE=25.000,CODECS=\"avc1.64001e,mp4a.40.2\"
+		index-f3-v1-a1.m3u8
+
+		#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=217533,RESOLUTION=1920x1080,CODECS=\"avc1.640032\",URI=\"iframes-f1-v1-a1.m3u8\"
+		#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=140609,RESOLUTION=1280x720,CODECS=\"avc1.64001f\",URI=\"iframes-f2-v1-a1.m3u8\"
+		#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=58096,RESOLUTION=640x360,CODECS=\"avc1.64001e\",URI=\"iframes-f3-v1-a1.m3u8\"
+	";
+
+	let multi_variant_playlist = parse(input).unwrap();
+	assert_eq!(
+		multi_variant_playlist,
+		MultiVariantPlaylist {
+			variant_streams: vec![
+				VariantStream {
+					program_id: Some(1),
+					bandwidth: 2553505,
+					resolution: (1920, 1080),
+					frame_rate: Some(25.0),
+					codecs: Some("avc1.640032,mp4a.40.2".to_string()),
+					uri: "index-f1-v1-a1.m3u8".to_string(),
+				},
+				VariantStream {
+					program_id: Some(1),
+					bandwidth: 1420969,
+					resolution: (1280, 720),
+					frame_rate: Some(25.0),
+					codecs: Some("avc1.64001f,mp4a.40.2".to_string()),
+					uri: "index-f2-v1-a1.m3u8".to_string(),
+				},
+				VariantStream {
+					program_id: Some(1),
+					bandwidth: 641061,
+					resolution: (640, 360),
+					frame_rate: Some(25.0),
+					codecs: Some("avc1.64001e,mp4a.40.2".to_string()),
+					uri: "index-f3-v1-a1.m3u8".to_string(),
+				},
+			],
+			frame_streams: vec![
+				FrameStream {
+					bandwidth: 217533,
+					resolution: (1920, 1080),
+					codecs: "avc1.640032".to_string(),
+					uri: "iframes-f1-v1-a1.m3u8".to_string(),
+				},
+				FrameStream {
+					bandwidth: 140609,
+					resolution: (1280, 720),
+					codecs: "avc1.64001f".to_string(),
+					uri: "iframes-f2-v1-a1.m3u8".to_string(),
+				},
+				FrameStream {
+					bandwidth: 58096,
+					resolution: (640, 360),
+					codecs: "avc1.64001e".to_string(),
+					uri: "iframes-f3-v1-a1.m3u8".to_string(),
+				},
+			],
+		}
+	);
 }
